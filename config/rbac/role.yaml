@@ -45,6 +45,7 @@ rules:
   - source.toolkit.fluxcd.io
   resources:
   - helmcharts
+  - ocirepositories
   verbs:
   - get
   - list
@@ -53,5 +54,6 @@ rules:
   - source.toolkit.fluxcd.io
   resources:
   - helmcharts/status
+  - ocirepositories/status
   verbs:
   - get

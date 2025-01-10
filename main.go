@@ -28,12 +28,12 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
-	"k8s.io/utils/pointer"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/fluxcd/pkg/runtime/acl"
 	"github.com/fluxcd/pkg/runtime/client"
@@ -46,11 +46,15 @@ import (
 	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/pprof"
 	"github.com/fluxcd/pkg/runtime/probes"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	sourcev1beta2 "github.com/fluxcd/source-controller/api/v1beta2"
 
-	v2 "github.com/fluxcd/helm-controller/api/v2beta1"
+	v2 "github.com/fluxcd/helm-controller/api/v2"
+	intdigest "github.com/fluxcd/helm-controller/internal/digest"
+
 	// +kubebuilder:scaffold:imports
 
+	intacl "github.com/fluxcd/helm-controller/internal/acl"
 	"github.com/fluxcd/helm-controller/internal/controller"
 	"github.com/fluxcd/helm-controller/internal/features"
 	intkube "github.com/fluxcd/helm-controller/internal/kube"
@@ -68,6 +72,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(sourcev1.AddToScheme(scheme))
+	utilruntime.Must(sourcev1beta2.AddToScheme(scheme))
 	utilruntime.Must(v2.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -94,6 +99,7 @@ func main() {
 		oomWatchMemoryThreshold   uint8
 		oomWatchMaxMemoryPath     string
 		oomWatchCurrentMemoryPath string
+		snapshotDigestAlgo        string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080",
@@ -120,6 +126,8 @@ func main() {
 		"The path to the cgroup memory limit file. Requires feature gate 'OOMWatch' to be enabled. If not set, the path will be automatically detected.")
 	flag.StringVar(&oomWatchCurrentMemoryPath, "oom-watch-current-memory-path", "",
 		"The path to the cgroup current memory usage file. Requires feature gate 'OOMWatch' to be enabled. If not set, the path will be automatically detected.")
+	flag.StringVar(&snapshotDigestAlgo, "snapshot-digest-algo", intdigest.Canonical.String(),
+		"The algorithm to use to calculate the digest of Helm release storage snapshots.")
 
 	clientOptions.BindFlags(flag.CommandLine)
 	logOptions.BindFlags(flag.CommandLine)
@@ -173,13 +181,26 @@ func main() {
 		leaderElectionId = leaderelection.GenerateID(leaderElectionId, watchOptions.LabelSelector)
 	}
 
-	// set the managedFields owner for resources reconciled from Helm charts
+	// Set the managedFields owner for resources reconciled from Helm charts.
 	kube.ManagedFieldsManager = controllerName
 
+	// Configure the ACL policy.
+	intacl.AllowCrossNamespaceRef = !aclOptions.NoCrossNamespaceRefs
+
+	// Configure the digest algorithm.
+	if snapshotDigestAlgo != intdigest.Canonical.String() {
+		algo, err := intdigest.AlgorithmForName(snapshotDigestAlgo)
+		if err != nil {
+			setupLog.Error(err, "unable to configure canonical digest algorithm")
+			os.Exit(1)
+		}
+		intdigest.Canonical = algo
+	}
+
 	restConfig := client.GetConfigOrDie(clientOptions)
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+
+	mgrConfig := ctrl.Options{
 		Scheme:                        scheme,
-		MetricsBindAddress:            metricsAddr,
 		HealthProbeBindAddress:        healthAddr,
 		LeaderElection:                leaderElectionOptions.Enable,
 		LeaderElectionReleaseOnCancel: leaderElectionOptions.ReleaseOnCancel,
@@ -198,20 +219,30 @@ func main() {
 			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
 				&v2.HelmRelease{}: {Label: watchSelector},
 			},
-			Namespaces: []string{watchNamespace},
 		},
 		Controller: ctrlcfg.Controller{
-			RecoverPanic:            pointer.Bool(true),
+			RecoverPanic:            ptr.To(true),
 			MaxConcurrentReconciles: concurrent,
 		},
-	})
+		Metrics: metricsserver.Options{
+			BindAddress:   metricsAddr,
+			ExtraHandlers: pprof.GetHandlers(),
+		},
+	}
+
+	if watchNamespace != "" {
+		mgrConfig.Cache.DefaultNamespaces = map[string]ctrlcache.Config{
+			watchNamespace: ctrlcache.Config{},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, mgrConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
 	probes.SetupChecks(mgr, setupLog)
-	pprof.SetupHandlers(mgr, setupLog)
 
 	metricsH := helper.NewMetrics(mgr, metrics.MustMakeRecorder(), v2.HelmReleaseFinalizer)
 	var eventRecorder *events.Recorder
@@ -237,19 +268,15 @@ func main() {
 		ctx = ow.Watch(ctx)
 	}
 
-	pollingOpts := polling.Options{}
 	if err = (&controller.HelmReleaseReconciler{
-		Client:              mgr.GetClient(),
-		Config:              mgr.GetConfig(),
-		Scheme:              mgr.GetScheme(),
-		EventRecorder:       eventRecorder,
-		Metrics:             metricsH,
-		NoCrossNamespaceRef: aclOptions.NoCrossNamespaceRefs,
-		ClientOpts:          clientOptions,
-		KubeConfigOpts:      kubeConfigOpts,
-		PollingOpts:         pollingOpts,
-		StatusPoller:        polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), pollingOpts),
-		ControllerName:      controllerName,
+		Client:           mgr.GetClient(),
+		APIReader:        mgr.GetAPIReader(),
+		EventRecorder:    eventRecorder,
+		Metrics:          metricsH,
+		GetClusterConfig: ctrl.GetConfig,
+		ClientOpts:       clientOptions,
+		KubeConfigOpts:   kubeConfigOpts,
+		FieldManager:     controllerName,
 	}).SetupWithManager(ctx, mgr, controller.HelmReleaseReconcilerOptions{
 		DependencyRequeueInterval: requeueDependency,
 		HTTPRetry:                 httpRetry,

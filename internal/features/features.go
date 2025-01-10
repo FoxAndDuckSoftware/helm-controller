@@ -31,11 +31,15 @@ const (
 	// DetectDrift configures the detection of cluster state drift compared to
 	// the desired state as described in the manifest of the Helm release
 	// storage object.
+	// Deprecated in v0.37.0, use the drift detection mode on the HelmRelease
+	// object instead.
 	DetectDrift = "DetectDrift"
 
 	// CorrectDrift configures the correction of cluster state drift compared to
 	// the desired state as described in the manifest of the Helm release. It
 	// is only effective when DetectDrift is enabled.
+	// Deprecated in v0.37.0, use the drift detection mode on the HelmRelease
+	// object instead.
 	CorrectDrift = "CorrectDrift"
 
 	// AllowDNSLookups allows the controller to perform DNS lookups when rendering Helm
@@ -47,6 +51,13 @@ const (
 	// OOMWatch enables the OOM watcher, which will gracefully shut down the controller
 	// when the memory usage exceeds the configured limit. This is disabled by default.
 	OOMWatch = "OOMWatch"
+
+	// AdoptLegacyReleases enables the adoption of the historical Helm release
+	// based on the status fields from a v2beta1 HelmRelease object.
+	// This is enabled by default to support an upgrade path from v2beta1 to v2
+	// without the need to upgrade the Helm release. But it can be disabled to
+	// avoid potential abuse of the adoption mechanism.
+	AdoptLegacyReleases = "AdoptLegacyReleases"
 )
 
 var features = map[string]bool{
@@ -54,17 +65,20 @@ var features = map[string]bool{
 	// opt-in from v0.28
 	CacheSecretsAndConfigMaps: false,
 	// DetectDrift
-	// opt-in from v0.31
+	// deprecated in v0.37.0
 	DetectDrift: false,
 	// CorrectDrift,
-	// opt-out from v0.31.2
-	CorrectDrift: true,
+	// deprecated in v0.37.0
+	CorrectDrift: false,
 	// AllowDNSLookups
 	// opt-in from v0.31
 	AllowDNSLookups: false,
 	// OOMWatch
 	// opt-in from v0.31
 	OOMWatch: false,
+	// AdoptLegacyReleases
+	// opt-out from v0.37
+	AdoptLegacyReleases: true,
 }
 
 // FeatureGates contains a list of all supported feature gates and

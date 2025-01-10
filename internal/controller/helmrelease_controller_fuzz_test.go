@@ -28,151 +28,15 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 
-	v2 "github.com/fluxcd/helm-controller/api/v2beta1"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	"github.com/fluxcd/pkg/runtime/patch"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+
+	v2 "github.com/fluxcd/helm-controller/api/v2"
 )
-
-func FuzzHelmReleaseReconciler_composeValues(f *testing.F) {
-	scheme := testScheme()
-
-	tests := []struct {
-		targetPath   string
-		valuesKey    string
-		hrValues     string
-		createObject bool
-		secretData   []byte
-		configData   string
-	}{
-		{
-			targetPath: "flat",
-			valuesKey:  "custom-values.yaml",
-			secretData: []byte(`flat:
-  nested: value
-nested: value
-`),
-			configData: `flat: value
-nested:
-  configuration: value
-`,
-			hrValues: `
-other: values
-`,
-			createObject: true,
-		},
-		{
-			targetPath: "'flat'",
-			valuesKey:  "custom-values.yaml",
-			secretData: []byte(`flat:
-  nested: value
-nested: value
-`),
-			configData: `flat: value
-nested:
-  configuration: value
-`,
-			hrValues: `
-other: values
-`,
-			createObject: true,
-		},
-		{
-			targetPath: "flat[0]",
-			secretData: []byte(``),
-			configData: `flat: value`,
-			hrValues: `
-other: values
-`,
-			createObject: true,
-		},
-		{
-			secretData: []byte(`flat:
-  nested: value
-nested: value
-`),
-			configData: `flat: value
-nested:
-  configuration: value
-`,
-			hrValues: `
-other: values
-`,
-			createObject: true,
-		},
-		{
-			targetPath: "some-value",
-			hrValues: `
-other: values
-`,
-			createObject: false,
-		},
-	}
-
-	for _, tt := range tests {
-		f.Add(tt.targetPath, tt.valuesKey, tt.hrValues, tt.createObject, tt.secretData, tt.configData)
-	}
-
-	f.Fuzz(func(t *testing.T,
-		targetPath, valuesKey, hrValues string, createObject bool, secretData []byte, configData string) {
-
-		// objectName represents a core Kubernetes name (Secret/ConfigMap) which is validated
-		// upstream, and also validated by us in the OpenAPI-based validation set in
-		// v2.ValuesReference. Therefore a static value here suffices, and instead we just
-		// play with the objects presence/absence.
-		objectName := "values"
-		resources := []runtime.Object{}
-
-		if createObject {
-			resources = append(resources,
-				valuesConfigMap(objectName, map[string]string{valuesKey: configData}),
-				valuesSecret(objectName, map[string][]byte{valuesKey: secretData}),
-			)
-		}
-
-		references := []v2.ValuesReference{
-			{
-				Kind:       "ConfigMap",
-				Name:       objectName,
-				ValuesKey:  valuesKey,
-				TargetPath: targetPath,
-			},
-			{
-				Kind:       "Secret",
-				Name:       objectName,
-				ValuesKey:  valuesKey,
-				TargetPath: targetPath,
-			},
-		}
-
-		c := fake.NewFakeClientWithScheme(scheme, resources...)
-		r := &HelmReleaseReconciler{Client: c}
-		var values *apiextensionsv1.JSON
-		if hrValues != "" {
-			v, _ := yaml.YAMLToJSON([]byte(hrValues))
-			values = &apiextensionsv1.JSON{Raw: v}
-		}
-
-		hr := v2.HelmRelease{
-			Spec: v2.HelmReleaseSpec{
-				ValuesFrom: references,
-				Values:     values,
-			},
-		}
-
-		// OpenAPI-based validation on schema is not verified here.
-		// Therefore some false positives may be arise, as the apiserver
-		// would not allow such values to make their way into the control plane.
-		//
-		// Testenv could be used so the fuzzing covers the entire E2E.
-		// The downsize being the resource and time cost per test would be a lot higher.
-		//
-		// Another approach could be to add validation to reject invalid inputs before
-		// the r.composeValues call.
-		_, _ = r.composeValues(logr.NewContext(context.TODO(), logr.Discard()), hr)
-	})
-}
 
 func FuzzHelmReleaseReconciler_reconcile(f *testing.F) {
 	scheme := testScheme()
@@ -221,19 +85,18 @@ other: values
 		hc.ObjectMeta.Name = hr.GetHelmChartName()
 		hc.ObjectMeta.Namespace = hr.Spec.Chart.GetNamespace(hr.Namespace)
 
-		resources := []runtime.Object{
+		resources := []client.Object{
 			valuesConfigMap("values", map[string]string{valuesKey: configData}),
 			valuesSecret("values", map[string][]byte{valuesKey: secretData}),
 			&hc,
 		}
 
-		c := fake.NewFakeClientWithScheme(scheme, resources...)
+		c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v2.HelmRelease{}).WithObjects(resources...).Build()
 		r := &HelmReleaseReconciler{
 			Client:        c,
 			EventRecorder: &DummyRecorder{},
 		}
-
-		_, _, _ = r.reconcile(logr.NewContext(context.TODO(), logr.Discard()), hr)
+		_, _ = r.reconcileRelease(logr.NewContext(context.TODO(), logr.Discard()), patch.NewSerialPatcher(&hr, c), &hr)
 	})
 }
 

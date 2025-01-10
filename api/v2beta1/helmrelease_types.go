@@ -28,6 +28,9 @@ import (
 
 	"github.com/fluxcd/pkg/apis/kustomize"
 	"github.com/fluxcd/pkg/apis/meta"
+
+	v2 "github.com/fluxcd/helm-controller/api/v2"
+	"github.com/fluxcd/helm-controller/api/v2beta2"
 )
 
 const HelmReleaseKind = "HelmRelease"
@@ -67,7 +70,15 @@ type HelmReleaseSpec struct {
 	// Chart defines the template of the v1beta2.HelmChart that should be created
 	// for this HelmRelease.
 	// +required
-	Chart HelmChartTemplate `json:"chart"`
+	Chart *HelmChartTemplate `json:"chart,omitempty"`
+
+	// ChartRef holds a reference to a source controller resource containing the
+	// Helm chart artifact.
+	//
+	// Note: this field is provisional to the v2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	ChartRef *v2.CrossNamespaceSourceReference `json:"chartRef,omitempty"`
 
 	// Interval at which to reconcile the Helm release.
 	// This interval is approximate and may be subject to jitter to ensure
@@ -153,6 +164,15 @@ type HelmReleaseSpec struct {
 	//
 	// +optional
 	PersistentClient *bool `json:"persistentClient,omitempty"`
+
+	// DriftDetection holds the configuration for detecting and handling
+	// differences between the manifest in the Helm storage and the resources
+	// currently existing in the cluster.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	DriftDetection *v2beta2.DriftDetection `json:"driftDetection,omitempty"`
 
 	// Install holds the configuration for Helm install actions for this HelmRelease.
 	// +optional
@@ -863,6 +883,11 @@ type HelmReleaseStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// ObservedPostRenderersDigest is the digest for the post-renderers of
+	// the last successful reconciliation attempt.
+	// +optional
+	ObservedPostRenderersDigest string `json:"observedPostRenderersDigest,omitempty"`
+
 	meta.ReconcileRequestStatus `json:",inline"`
 
 	// Conditions holds the conditions for the HelmRelease.
@@ -905,6 +930,62 @@ type HelmReleaseStatus struct {
 	// state. It is reset after a successful reconciliation.
 	// +optional
 	UpgradeFailures int64 `json:"upgradeFailures,omitempty"`
+
+	// StorageNamespace is the namespace of the Helm release storage for the
+	// current release.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	StorageNamespace string `json:"storageNamespace,omitempty"`
+
+	// History holds the history of Helm releases performed for this HelmRelease
+	// up to the last successfully completed release.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	History v2.Snapshots `json:"history,omitempty"`
+
+	// LastAttemptedGeneration is the last generation the controller attempted
+	// to reconcile.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	LastAttemptedGeneration int64 `json:"lastAttemptedGeneration,omitempty"`
+
+	// LastAttemptedConfigDigest is the digest for the config (better known as
+	// "values") of the last reconciliation attempt.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	LastAttemptedConfigDigest string `json:"lastAttemptedConfigDigest,omitempty"`
+
+	// LastAttemptedReleaseAction is the last release action performed for this
+	// HelmRelease. It is used to determine the active remediation strategy.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	LastAttemptedReleaseAction string `json:"lastAttemptedReleaseAction,omitempty"`
+
+	// LastHandledForceAt holds the value of the most recent force request
+	// value, so a change of the annotation value can be detected.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	LastHandledForceAt string `json:"lastHandledForceAt,omitempty"`
+
+	// LastHandledResetAt holds the value of the most recent reset request
+	// value, so a change of the annotation value can be detected.
+	//
+	// Note: this field is provisional to the v2beta2 API, and not actively used
+	// by v2beta1 HelmReleases.
+	// +optional
+	LastHandledResetAt string `json:"lastHandledResetAt,omitempty"`
 }
 
 // GetHelmChart returns the namespace and name of the HelmChart.
@@ -1014,13 +1095,13 @@ const (
 )
 
 // +genclient
-// +genclient:Namespaced
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=hr
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].message",description=""
+// +kubebuilder:deprecatedversion:warning="v2beta1 HelmRelease is deprecated, upgrade to v2"
 
 // HelmRelease is the Schema for the helmreleases API
 type HelmRelease struct {

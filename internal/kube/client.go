@@ -18,6 +18,7 @@ package kube
 
 import (
 	"fmt"
+	"net/http"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -130,6 +131,10 @@ func (c *MemoryRESTClientGetter) ToRESTConfig() (*rest.Config, error) {
 	if c.cfg == nil {
 		return nil, fmt.Errorf("MemoryRESTClientGetter has no REST config")
 	}
+	// add retries to fix temporary "etcdserver: leader changed" errors from kube-apiserver
+	c.cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		return &retryingRoundTripper{wrapped: rt}
+	})
 	return c.cfg, nil
 }
 
@@ -198,7 +203,7 @@ func (c *MemoryRESTClientGetter) toRESTMapper() (meta.RESTMapper, error) {
 		return nil, err
 	}
 	mapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
-	return restmapper.NewShortcutExpander(mapper, discoveryClient), nil
+	return restmapper.NewShortcutExpander(mapper, discoveryClient, nil), nil
 }
 
 // ToRawKubeConfigLoader returns a clientcmd.ClientConfig using
